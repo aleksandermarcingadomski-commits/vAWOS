@@ -18,6 +18,13 @@ import subprocess
 from difflib import SequenceMatcher
 from datetime import datetime, timezone, timedelta
 
+# OBSŁUGA REQUESTS (Zgodnie z wymogami VATSIM API)
+try:
+    import requests
+    REQUESTS_AVAILABLE = True
+except ImportError:
+    REQUESTS_AVAILABLE = False
+
 # DZWIEKI
 try:
     import winsound
@@ -208,7 +215,7 @@ class WindSim:
         if m_dir is None: m_dir = 0
         if m_spd is None: m_spd = 0
         
-        # WIATR ZMIENNY
+        # WIATR ZMIENNY - oscylacja w pełnym zakresie 360 st.
         if self.is_vrb:
             if random.random() < 0.05: 
                 self.vrb_target_dir = random.randint(0, 359)
@@ -473,48 +480,70 @@ class AWOSPanel(tk.Frame):
             state = self.app.airport_states.get(icao)
             if not state: return
 
-            qnh_val = state.metar.qnh
-            if qnh_val != "N/A" and qnh_val.isdigit():
-                lat, lon = self.app.get_coords(icao)
-                tide = 0
-                if lon:
-                    now = datetime.now(timezone.utc)
-                    local_hour = (now.hour + now.minute/60.0 + float(lon)/15.0) % 24
-                    tide = math.cos(4 * math.pi * (local_hour - 10) / 24) * 1.5
-                qnh_val = str(int(qnh_val) + getattr(state, 'mb_qnh_spike', 0) + int(round(tide)))
+            # Bezpieczne parsowanie QNH
+            try:
+                qnh_val = state.metar.qnh
+                if qnh_val != "N/A" and qnh_val.isdigit():
+                    lat, lon = self.app.get_coords(icao)
+                    tide = 0
+                    if lon:
+                        now = datetime.now(timezone.utc)
+                        local_hour = (now.hour + now.minute/60.0 + float(lon)/15.0) % 24
+                        tide = math.cos(4 * math.pi * (local_hour - 10) / 24) * 1.5
+                    qnh_val = str(int(qnh_val) + getattr(state, 'mb_qnh_spike', 0) + int(round(tide)))
+                    
+                self.lbl_top_qnh.config(text=f"QNH: {qnh_val}")
+                self.lbl_bot_qnh.config(text=f"QNH: {qnh_val} hPa")
+            except Exception: 
+                pass
+
+            # Temperatura
+            try:
+                self.lbl_bot_temp.config(text=f"TEMP: {state.metar.temp} °C")
+                self.lbl_bot_dew.config(text=f"DEW: {state.metar.dew} °C")
+            except Exception:
+                pass
                 
-            self.lbl_top_qnh.config(text=f"QNH: {qnh_val}")
-            self.lbl_bot_temp.config(text=f"TEMP: {state.metar.temp} °C")
-            self.lbl_bot_dew.config(text=f"DEW: {state.metar.dew} °C")
-            self.lbl_bot_qnh.config(text=f"QNH: {qnh_val} hPa")
-            
-            vis_text = "> 10km (CAVOK)" if state.metar.vis == "9999" else f"{state.metar.vis} m"
-            self.lbl_bot_vis.config(text=f"VISIBILITY: {vis_text}")
-            
+            # Widzialność
+            try:
+                vis_text = "> 10km (CAVOK)" if state.metar.vis == "9999" else f"{state.metar.vis} m"
+                self.lbl_bot_vis.config(text=f"VISIBILITY: {vis_text}")
+            except Exception:
+                pass
+                
+            # VMC / IMC
             try:
                 if state.metar.vis != "N/A" and state.metar.vis != "///":
                     if int(state.metar.vis) >= 5000: self.lbl_vmc.config(text="VMC", bg="#004400", fg=TEXT_GREEN)
                     else: self.lbl_vmc.config(text="IMC", bg="#660000", fg=TEXT_RED)
                 else: self.lbl_vmc.config(text="VMC", bg="#004400", fg=TEXT_GREEN)
-            except: self.lbl_vmc.config(text="VMC", bg="#004400", fg=TEXT_GREEN)
+            except Exception: 
+                self.lbl_vmc.config(text="VMC", bg="#004400", fg=TEXT_GREEN)
 
+            # LVP
             is_lvp = False
             try:
                 if state.metar.vis != "N/A" and state.metar.vis != "///" and int(state.metar.vis) < 800: is_lvp = True
-            except: pass
+            except Exception: 
+                pass
                 
             try:
                 if state.metar.rvr != "///":
                     rvr_num_str = re.search(r'\d{4}', state.metar.rvr)
                     if rvr_num_str and int(rvr_num_str.group()) < 600: is_lvp = True
-            except: pass
+            except Exception: 
+                pass
 
             if is_lvp: self.lbl_lvp.config(bg="#E6A817", fg="#000000") 
             else: self.lbl_lvp.config(bg=BOX_BG, fg="#444444") 
 
-            raw_wind = re.search(r'\b(\d{3}|VRB)(\d{2,3})(?:G(\d{2,3}))?KT\b(?:\s+\d{3}V\d{3})?', state.metar.raw)
-            met_str = raw_wind.group(0) if raw_wind else "N/A"
-            self.lbl_bot_wind.config(text=f"WIND: {met_str}")
+            # Wiatr na dolnym pasku
+            try:
+                raw_wind = re.search(r'\b(\d{3}|VRB)(\d{2,3})(?:G(\d{2,3}))?KT\b(?:\s+\d{3}V\d{3})?', state.metar.raw)
+                met_str = raw_wind.group(0) if raw_wind else "N/A"
+                self.lbl_bot_wind.config(text=f"WIND: {met_str}")
+            except Exception:
+                pass
         except Exception as e:
             pass
 
@@ -527,11 +556,16 @@ class AWOSPanel(tk.Frame):
             self.btn_map.config(text="ŁADUJE", bg="#DAA520")
             self.update_idletasks()
             
-            w, h, x, y = self.winfo_width(), self.winfo_height(), self.winfo_rootx(), self.winfo_rooty()
-            is_full = str(self.app.is_fullscreen)
+            # Wymuszamy pobranie rozdzielczości całego ekranu dla mapy
+            w = self.app.winfo_screenwidth()
+            h = self.app.winfo_screenheight()
+            x = 0
+            y = 0
+            is_full = "True"
             
             icao = self.current_icao.get()
             lat, lon = self.app.get_coords(icao)
+            
             if not lat or not lon:
                 lat, lon = "52.0", "19.0" 
                 
@@ -596,7 +630,7 @@ class AWOSPanel(tk.Frame):
         cur_wind_lbl = tk.Label(frame, text="INSTANT WIND: ---/--", bg=BOX_BG, fg=TEXT_YELLOW, font=("Consolas", self.font_sz_lbl_bot, "bold"), relief=tk.SUNKEN, bd=1, width=22)
         cur_wind_lbl.pack(anchor="w", padx=5, pady=1)
 
-        # KOMPONENTY WIATRU
+        # KOMPONENTY WIATRU (HW/XW)
         hw_xw_lbl = tk.Label(frame, text="HW: --kt | XW: --kt", bg=BOX_BG, fg=TEXT_CYAN, font=("Consolas", self.font_sz_lbl_bot, "bold"), relief=tk.SUNKEN, bd=1, width=22)
         hw_xw_lbl.pack(anchor="w", padx=5, pady=1)
         
@@ -657,7 +691,7 @@ class AWOSPanel(tk.Frame):
             self.update_runway_buttons(icao)
             self.close_detail_view(clear_diffs=False)
             
-            # ATIS
+            # ATIS INSTANT LOAD z GLOBAL CACHE
             self.app.process_vatsim_atis_from_global(icao)
             
             state = self.app.airport_states.get(icao)
@@ -699,7 +733,11 @@ class AWOSPanel(tk.Frame):
 
     def generate_decoded_metar(self, state):
         out = "ODKODOWANE DANE METAR:\n\n"
-        out += f"Kierunek Wiatru:   {state.target_dir:03d}°\n"
+        if state.is_vrb: 
+            out += f"Kierunek Wiatru:   Zmienny (VRB)\n"
+        else: 
+            out += f"Kierunek Wiatru:   {state.target_dir:03d}°\n"
+            
         out += f"Prędkość Wiatru:   {state.target_spd} kt\n"
         if state.target_gust > 0: 
             out += f"Porywy (Gusts):    {state.target_gust} kt\n"
@@ -1120,6 +1158,7 @@ class AWOSPanel(tk.Frame):
         if 'grf' in env:
             col["grf_lbl"].config(text=f"GRF: {env['grf']}", bg=PANEL_BG, fg=env.get('grf_color', TEXT_WHITE))
 
+# GŁÓWNA KLASA KONTROLERA APLIKACJI
 class VirtualAWOS(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -1154,12 +1193,12 @@ class VirtualAWOS(tk.Tk):
         self.panels = []
         self.blink_state = False
         self.saved_dual_icao = ""
-        self.global_atis_data = [] 
+        self.global_atis_data = [] # Globalny Cache ATIS
         
         self.main_container = tk.Frame(self, bg=BG_COLOR)
         self.main_container.pack(fill=tk.BOTH, expand=True)
         
-        # WCZYTANIE LOTNISK
+        # Inicjalizacja lotnisk
         self.airport_states["EPWA"] = AirportState("EPWA")
         self.airport_states["EPMO"] = AirportState("EPMO")
         
@@ -1190,7 +1229,7 @@ class VirtualAWOS(tk.Tk):
                 if len(self.panels) > 1:
                     self.saved_dual_icao = self.panels[1].current_icao.get()
 
-        # ZAPISANIE DROG STARTOWYCH
+        # Uratowanie pasów startowych przed usunięciem paneli
         for p in self.panels:
             icao = p.current_icao.get()
             if icao:
@@ -1215,6 +1254,7 @@ class VirtualAWOS(tk.Tk):
             self.panels.extend([p1, p2])
 
         for p in self.panels:
+            # Szybko sprawdź czy to lotnisko już zaciągnęło dane ATIS i METAR, w przeciwnym razie wyślij pobieranie
             state = self.airport_states.get(p.current_icao.get())
             if state and state.metar_valid:
                 p.update_static_ui()
@@ -1555,32 +1595,48 @@ class VirtualAWOS(tk.Tk):
                 state.om_data = data
         except Exception: pass
 
-    # VATSIM ATIS
     def periodic_vatsim_atis_fetch(self):
         threading.Thread(target=self.bg_fetch_vatsim_atis, daemon=True).start()
         self.after(60000, self.periodic_vatsim_atis_fetch)
 
     def bg_fetch_vatsim_atis(self):
         try:
-            req = urllib.request.Request("https://data.vatsim.net/v3/afv-atis-data.json", headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=5) as response:
-                self.global_atis_data = json.loads(response.read().decode('utf-8'))
+            url = "https://data.vatsim.net/v3/afv-atis-data.json"
+            if REQUESTS_AVAILABLE:
+                headers = {'Accept': 'application/json'}
+                response = requests.request("GET", url, headers=headers, timeout=10)
+                try:
+                    data = response.json()
+                except:
+                    data = json.loads(response.text)
+            else:
+                req = urllib.request.Request(url, headers={'Accept': 'application/json'})
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    data = json.loads(response.read().decode('utf-8'))
+                    
+            if isinstance(data, list):
+                self.global_atis_data = data
+            elif isinstance(data, dict):
+                self.global_atis_data = data.get("atis", [])
                 
             for icao in list(self.airport_states.keys()):
                 self.process_vatsim_atis_from_global(icao)
-        except Exception: pass
+        except Exception as e:
+            pass
 
     def process_vatsim_atis_from_global(self, icao):
         if not getattr(self, 'global_atis_data', None): return
         
         results = {"dep": None, "arr": None, "atis": None}
         for item in self.global_atis_data:
-            callsign = item.get("callsign", "")
+            callsign = str(item.get("callsign", ""))
             if icao in callsign and "ATIS" in callsign:
-                t = item.get("text_atis", "")
+                t = item.get("text_atis", item.get("text", ""))
                 if isinstance(t, list): t = "\n".join(t)
+                if not t: t = f"ATIS dostępny tylko głosowo na freq: {item.get('freq', '---')}"
                 
                 raw_code = item.get("atis_code", "-")
+                if not raw_code: raw_code = "-"
                 code = self.extract_atis_letter(t, raw_code)
                 
                 if "_D_" in callsign: results["dep"] = {"code": code, "text": t}
@@ -1655,7 +1711,7 @@ class VirtualAWOS(tk.Tk):
         state.metar.var_min, state.metar.var_max = None, None
         state.metar.clouds = []
         
-        # LOGIKA VRB 
+        # LOGIKA VRB DETEKCJA
         wnd_match = re.search(r'\b(\d{3}|VRB)(\d{2,3})(?:G(\d{2,3}))?KT\b', metar_str)
         if wnd_match:
             d = wnd_match.group(1)
@@ -1788,6 +1844,7 @@ class VirtualAWOS(tk.Tk):
             except Exception as e:
                 pass
 
+        # Odśwież UI tylko dla aktywnych paneli
         for p in self.panels:
             p.refresh_wind_ui()
 
@@ -1802,7 +1859,7 @@ class VirtualAWOS(tk.Tk):
         b_gust = state.target_gust
         b_vis = state.target_vis
         
-        # WIND CALM
+        # ZABEZPIECZENIE: CZY JEST CALM WIND?
         is_calm = (state.target_spd <= 4)
         
         lat, lon = self.get_coords(state.icao)
@@ -1821,7 +1878,7 @@ class VirtualAWOS(tk.Tk):
 
         tp = state.terrain_profile
         
-        # OROGRAFIA
+        # OROGRAFIA DZIAŁA TYLKO GDY WIATR NIE JEST CALM I NIE JEST VRB
         if not is_calm and not getattr(state, 'is_vrb', False):
             if tp['type'] == 'VALLEY' and tp['valley_axis'] is not None:
                 diff_to_axis = (b_dir - tp['valley_axis'] + 180) % 360 - 180
@@ -2039,7 +2096,7 @@ class VirtualAWOS(tk.Tk):
 
         state.tick_counter += 1
         
-        # AKTUALIZACJA ŚRODOWISKA
+        # AKTUALIZACJA ŚRODOWISKA (WODA, CHMURY, WIDZIALNOŚĆ) W TLE
         wx_str = state.metar.raw
         is_cavok_or_few = False
         
